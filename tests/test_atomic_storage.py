@@ -120,3 +120,67 @@ def test_atomic_preserves_permissions(tmp_path):
     finally:
         storage.close()
     assert path.stat().st_mode & 0o777 == 0o640
+
+
+# =============================================================================
+# AVANCE 2 - HU4: Sincronizacion del directorio tras el reemplazo
+# Origen: Avance 1, seccion 5 (limite declarado: no se sincroniza el
+# directorio tras reemplazar).
+# Criterio: el orden es fsync(temporal) -> os.replace -> fsync(directorio).
+# Donde no se pueda abrir un directorio (Windows), la escritura sigue
+# funcionando.
+# Ciclo TDD: ROJO. Estas pruebas se escriben y fallan antes del codigo.
+# =============================================================================
+
+def _fd_kind(fd):
+    return 'dir' if stat.S_ISDIR(os.fstat(fd).st_mode) else 'file'
+
+
+def test_hu4_directory_synced_after_replace(tmp_path, monkeypatch):
+    """After os.replace, the parent directory must be synchronized."""
+    path = tmp_path / 'db.json'
+    path.write_text('{}', encoding='utf-8')
+    storage = JSONStorage(path, encoding='utf-8')
+    events = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd):
+        events.append('fsync-' + _fd_kind(fd))
+        return real_fsync(fd)
+
+    def spy_replace(source, destination):
+        events.append('replace')
+        return real_replace(source, destination)
+
+    monkeypatch.setattr('tinydb.storages.os.fsync', spy_fsync)
+    monkeypatch.setattr('tinydb.storages.os.replace', spy_replace)
+    try:
+        storage.write({'_default': {}})
+    finally:
+        storage.close()
+
+    assert events == ['fsync-file', 'replace', 'fsync-dir']
+
+
+def test_hu4_directory_sync_skipped_when_unsupported(tmp_path, monkeypatch):
+    """Where directories cannot be opened (Windows) the write still works."""
+    path = tmp_path / 'db.json'
+    path.write_text('{}', encoding='utf-8')
+    storage = JSONStorage(path, encoding='utf-8')
+    kinds = []
+    real_fsync = os.fsync
+
+    def spy_fsync(fd):
+        kinds.append(_fd_kind(fd))
+        return real_fsync(fd)
+
+    monkeypatch.setattr('tinydb.storages.os.fsync', spy_fsync)
+    monkeypatch.setattr('tinydb.storages._CAN_SYNC_DIR', False)
+    try:
+        storage.write({'_default': {}})
+    finally:
+        storage.close()
+
+    assert kinds == ['file']
+    assert json.loads(path.read_text(encoding='utf-8')) == {'_default': {}}
