@@ -12,7 +12,8 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 __all__ = ('Storage', 'JSONStorage', 'MemoryStorage')
-
+# Avance 2 - HU4: sincronizacion del directorio tras el reemplazo
+_CAN_SYNC_DIR = os.name != 'nt'
 
 def touch(path: str, create_dirs: bool):
     """
@@ -41,6 +42,16 @@ class Storage(ABC):
     A Storage (de)serializes the current state of the database and stores it in
     some place (memory, file on disk, ...).
     """
+
+    def _sync_directory(directory: str) -> None:
+    """Flush the directory entry so the replacement survives a crash."""
+    if not _CAN_SYNC_DIR:
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
     # Using ABCMeta as metaclass allows instantiating only storages that have
     # implemented read and write
@@ -150,6 +161,19 @@ class JSONStorage(Storage):
 
         serialized = json.dumps(data, **self.kwargs)
         temporary = None
+        self._handle.close()
+            try:
+                os.replace(temporary, self._path)
+                temporary = None
+                _sync_directory(os.path.dirname(self._path))
+            finally:
+                reopen_mode = 'rb+' if 'b' in self._mode else 'r+'
+                self._handle = open(
+                    self._path, mode=reopen_mode,
+                    encoding=None if 'b' in self._mode else staged.encoding)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
         try:
             # Stage the complete document on the same filesystem. The live
             # database is untouched until synchronization succeeds.
